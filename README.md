@@ -4,7 +4,7 @@ A Universal Windows Platform app for simple file transfer between paired devices
 ## Installation
 If possible, run Install.ps1 as a PowerShell script to automate the process of installing the required self-signed certificate followed by the app itself.
 
-To manually install, first double-click UWPBluetoothTransfer_1.1.0.0_x86_x64_arm_arm64.cer to install the certificate. Choose Trusted People as the certificate store. Then, double-click UWPBluetoothTransfer_1.0.0.0_x86_x64_arm_arm64.msixbundle and follow the installation wizard to install the application.
+To manually install, first double-click UWPBluetoothTransfer_1.1.0.0_x86_x64_arm_arm64.cer to install the certificate. Choose Trusted People as the certificate store. Then, double-click UWPBluetoothTransfer_1.1.0.0_x86_x64_arm_arm64.msixbundle and follow the installation wizard to install the application.
 
 ## Usage
 ### Sending files
