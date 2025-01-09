@@ -1,10 +1,20 @@
 # BTFileTransfer
-A Universal Windows Platform app for simple file transfer between paired devices via Bluetooth. Originally developed for use on the Hololens 2.
-
+A Universal Windows Platform app for simple file transfer between paired devices via Bluetooth. Originally developed for use on the Hololens 2. 
+<p align="center">
+ <img src=https://github.com/user-attachments/assets/bdb272e8-89d8-49cd-b47d-5cd242f4c2ee
+   width="500"/>
+<p/>
+  
 ## Installation
 If possible, run Install.ps1 as a PowerShell script to automate the process of installing the required self-signed certificate followed by the app itself.
 
 To manually install, first double-click UWPBluetoothTransfer_1.1.0.0_x86_x64_arm_arm64.cer to install the certificate. Choose Trusted People as the certificate store. Then, double-click UWPBluetoothTransfer_1.1.0.0_x86_x64_arm_arm64.msixbundle and follow the installation wizard to install the application.
+
+## Uninstallation
+### Windows 10/11
+Open PowerShell as administrator and use the following command:
+
+Get-AppxPackage 11a984ef-e41c-4b27-98a6-76e6d3b52d9e | Remove-AppxPackage 
 
 ## Usage
 ### Sending files
