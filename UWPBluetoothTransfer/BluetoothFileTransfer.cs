@@ -10,6 +10,11 @@ using Windows.Networking.Sockets;
 using System.IO;
 using System.Linq;
 using MimeMapping;
+using System.Diagnostics;
+using System.ServiceModel.Dispatcher;
+using Windows.Storage.Pickers;
+using static System.Net.WebRequestMethods;
+using Windows.UI.Xaml.Controls;
 
 namespace UWPBluetoothTransfer
 {
@@ -17,7 +22,12 @@ namespace UWPBluetoothTransfer
     {
         private RfcommDeviceService RfcommService { get; set; }
         private StreamSocket Socket { get; set; }
+        private StreamSocketListener Listener;
+        private RfcommServiceProvider Provider;
         public BluetoothDevice SelectedDevice {get; set;}
+        public TaskCompletionSource<bool> UserResponseTask;
+        public event EventHandler<(string fileName, long fileSize)> IncomingFileTransferRequested;
+        public event EventHandler<ReceivedFile> IncomingFileTransferCompleted;
 
         public async Task<List<BluetoothDevice>> ScanForBluetoothDevicesAsync()
         {
@@ -57,7 +67,6 @@ namespace UWPBluetoothTransfer
                         serviceIndex = i;
                         break;
                     }
-                    
                 }
 
                 if (serviceIndex == -1)
@@ -120,7 +129,7 @@ namespace UWPBluetoothTransfer
 
 
                         // Name header
-                        byte[] tempNameBytes = System.Text.Encoding.Unicode.GetBytes(spoofFileType ? Path.GetFileNameWithoutExtension(file.Name) : file.FileType);
+                        byte[] tempNameBytes = System.Text.Encoding.Unicode.GetBytes(spoofFileType ? Path.GetFileNameWithoutExtension(file.Name) : file.Name);
                         byte[] nameBytes = new byte[tempNameBytes.Length + 2];
 
                         // Swap endianness of name string
@@ -276,18 +285,269 @@ namespace UWPBluetoothTransfer
             }
         }
 
+        public void IncomingFileAccepted(bool accepted)
+        {
+            UserResponseTask?.SetResult(accepted);
+        }
+
+        public async Task StartListeningForFileTransferConnectionAsync(IProgress<double> progress = null)
+        {
+            try
+            {
+                // Ensure previous connections are properly disposed
+                Dispose();
+
+                // Set up RFCOMM server listener
+                Provider = await RfcommServiceProvider.CreateAsync(RfcommServiceId.ObexObjectPush); // OBEX Object Push Profile
+                Listener = new StreamSocketListener();
+                await Listener.BindServiceNameAsync(Provider.ServiceId.AsString(),
+                    SocketProtectionLevel.BluetoothEncryptionAllowNullAuthentication);
+
+                // No idea if this is at all relevant to receiving connections from a paired device to receive a file.
+                // My guess is that it isn't, but as long as it doesn't break anything I'm not touching it
+                Provider.StartAdvertising(Listener);
+
+                ReceivedFile receivedFile = null;
+
+                Listener.ConnectionReceived += async (sender, args) =>
+                {
+                    try
+                    {
+                        using (var reader = new DataReader(args.Socket.InputStream))
+                        using (var writer = new DataWriter(args.Socket.OutputStream))
+                        {
+                            reader.InputStreamOptions = InputStreamOptions.Partial;
+
+                            // Read OBEX Connect Request
+                            await reader.LoadAsync(64);
+                            uint buffer = reader.UnconsumedBufferLength;
+                            byte[] connectRequest = new byte[buffer];
+                            reader.ReadBytes(connectRequest);
+
+                            if (connectRequest[0] != 0x80) // Connect OpCode
+                            {
+                                // Send Connect Response
+                                byte[] failResponse = new byte[] {
+                                    0xC0, // Response code (Bad Request)
+                                    0x00, 0x07, // Packet length
+                                    0x10, // OBEX version
+                                    0x00, // Flags
+                                    0x20, 0x00 // Max packet length (8192)
+                                };
+                                writer.WriteBytes(failResponse);
+                                await writer.StoreAsync();
+                                throw new Exception("Invalid OBEX connect request");
+                            }
+
+
+                            // Send Connect Response
+                            byte[] connectResponse = new byte[] {
+                                0xA0, // Response code (Success)
+                                0x00, 0x07, // Packet length
+                                0x10, // OBEX version
+                                0x00, // Flags
+                                0x20, 0x00 // Max packet length (8192)
+                            };
+                            writer.WriteBytes(connectResponse);
+                            await writer.StoreAsync();
+
+                            // Process PUT request
+                            string fileName = "";
+                            long fileSize = 0;
+                            MemoryStream fileContent = new MemoryStream();
+                            int packetCount = 0;
+
+                            // Loop to receive and process all PUT packets
+                            while (true)
+                            {
+                                await reader.LoadAsync(3);
+                                byte[] header = new byte[3];
+                                reader.ReadBytes(header);
+                                
+                                if (header[0] != 0x02 && header[0] != 0x82) // PUT request
+                                    throw new Exception($"Invalid OBEX operation, received header 0x{BitConverter.ToString(header, 0, 1)}" );
+                                
+                                int packetLength = (header[1] << 8) | header[2];
+                                await reader.LoadAsync((uint)packetLength - 3);
+
+                                // Process headers
+                                while (reader.UnconsumedBufferLength > 0)
+                                {
+                                    uint totalBytesLoadedFromCurrentPacket = 3 + reader.UnconsumedBufferLength;
+
+                                    byte headerId = reader.ReadByte();
+                                    switch (headerId)
+                                    {
+                                        case 0x01: // Name
+                                            ushort nameLength = reader.ReadUInt16();
+                                            byte[] nameBytes = new byte[nameLength - 3];
+                                            reader.ReadBytes(nameBytes);
+                                            // Convert from UTF-16BE to string
+                                            fileName = System.Text.Encoding.BigEndianUnicode.GetString(nameBytes);
+                                            break;
+
+                                        case 0xC3: // Length
+                                            fileSize = (reader.ReadByte() << 24) |
+                                                     (reader.ReadByte() << 16) |
+                                                     (reader.ReadByte() << 8) |
+                                                     reader.ReadByte();
+                                            break;
+
+                                        case 0x48: // Body
+                                        case 0x49: // End of Body
+                                            ushort bodyLength = reader.ReadUInt16();
+                                            uint currentBufferLength = reader.UnconsumedBufferLength;
+
+                                            // If reported header length fails to match read buffer length, the body is sent/loaded in multiple parts but considered one packet
+                                            if (currentBufferLength < bodyLength - 3)
+                                            {
+                                                uint writtenBytes = 0;
+                                                do 
+                                                {
+                                                    currentBufferLength = reader.UnconsumedBufferLength;
+                                                    byte[] partialBodyBytes = new byte[currentBufferLength];
+                                                    reader.ReadBytes(partialBodyBytes);
+                                                    await fileContent.WriteAsync(partialBodyBytes, 0,
+                                                        partialBodyBytes.Length);
+                                                    progress?.Report((double)fileContent.Length / fileSize);
+
+                                                    writtenBytes += currentBufferLength;
+
+                                                    // Never load data that would be part of the next packet
+                                                    if(bodyLength - 3 - writtenBytes > 0)
+                                                        await reader.LoadAsync((uint)(bodyLength - 3 - writtenBytes));
+
+                                                    totalBytesLoadedFromCurrentPacket += reader.UnconsumedBufferLength;
+                                                } while (writtenBytes < bodyLength - 3);
+                                            }
+                                            else
+                                            {
+                                                byte[] bodyBytes = new byte[bodyLength - 3];
+                                                reader.ReadBytes(bodyBytes);
+                                                await fileContent.WriteAsync(bodyBytes, 0, bodyBytes.Length);
+                                                progress?.Report((double)fileContent.Length / fileSize);
+                                            }
+                                            break;
+
+                                        default:
+                                            // Skip unknown headers
+                                            ushort length = reader.ReadUInt16();
+                                            reader.ReadBytes(new byte[length - 3]);
+                                            break;
+                                    }
+                                }
+
+                                packetCount++;
+                                
+                                if (packetCount == 1)
+                                {
+                                    UserResponseTask = new TaskCompletionSource<bool>();
+
+                                    await Windows.ApplicationModel.Core.CoreApplication.MainView.CoreWindow.Dispatcher.RunAsync(
+                                        Windows.UI.Core.CoreDispatcherPriority.Normal,
+                                        () =>
+                                        {
+                                            // Call your method to show the prompt
+                                            IncomingFileTransferRequested?.Invoke(this, (fileName, fileSize));
+                                        }
+                                    );
+
+                                    bool userAccepted = await UserResponseTask.Task;
+                                    if (!userAccepted)
+                                    {
+                                        // Send rejection response
+                                        byte[] rejectResponse = new byte[] {
+                                            0xC3, // Forbidden - operation is understood but refused
+                                            0x00, 0x03 // Length
+                                        };
+                                        writer.WriteBytes(rejectResponse);
+                                        await writer.StoreAsync();
+                                        return; // Exit the transfer
+                                    }
+                                }
+                                
+                                byte[] response = new byte[] {
+                                    0x90, // Continue
+                                    0x00, 0x03 // Length
+                                };
+                                switch (header[0])
+                                {
+                                    case 0x02:
+                                        // Send continue response
+                                        writer.WriteBytes(response);
+                                        await writer.StoreAsync();
+                                        break;
+
+                                    case 0x82:
+                                        // Send success response
+                                        response[0] = 0xA0;
+                                        writer.WriteBytes(response);
+                                        await writer.StoreAsync();
+                                        break;
+                                }
+
+                                if (header[0] == 0x82)
+                                    break;
+                            }
+
+                            // File name should have a trailing string terminator character "\0" that needs to be removed for it to be handled correctly
+                            string trimmedFileName = fileName.TrimEnd(char.MinValue);
+                            receivedFile = new ReceivedFile(trimmedFileName, fileContent);
+                            
+                            // Send final success response
+                            byte[] finalResponse = new byte[] {
+                                0xA0, // Success
+                                0x00, 0x03 // Length
+                            };
+                            writer.WriteBytes(finalResponse);
+                            await writer.StoreAsync();
+                            IncomingFileTransferCompleted?.Invoke(this, receivedFile);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        // Handle transfer errors
+                        throw new Exception($"File receive failed: {ex.Message}", ex);
+                    }
+                };
+            }
+            catch (Exception ex)
+            {
+                Dispose();
+                throw new Exception($"File receive failed: {ex.Message}", ex);
+            }
+        }
+
+        public void StopListeningForFileTransferConnection()
+        {
+            Dispose();
+        }
+
         public void Dispose()
         {
-            if (Socket != null)
-            {
-                Socket.Dispose();
-                Socket = null;
-            }
-            if (RfcommService != null)
-            {
-                RfcommService.Dispose();
-                RfcommService = null;
-            }
+            Socket?.Dispose();
+            Socket = null;
+
+            RfcommService?.Dispose();
+            RfcommService = null;
+
+            Provider?.StopAdvertising();
+            Provider = null;
+
+            Listener?.Dispose();
+            Listener = null;
+        }
+    }
+
+    public class ReceivedFile
+    {
+        public string FileNameWithExtension;
+        public MemoryStream FileContent;
+
+        public ReceivedFile(string FileName, MemoryStream FileContent)
+        {
+            FileNameWithExtension = FileName;
+            this.FileContent = FileContent;
         }
     }
 }
