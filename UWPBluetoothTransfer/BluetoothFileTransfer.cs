@@ -58,11 +58,12 @@ namespace UWPBluetoothTransfer
                     throw new Exception("No RFCOMM services found on device.");
                 }
 
+                // set serviceIndex to index of OPP if present
                 int serviceIndex = -1;
                 for (int i = 0; i < result.Services.Count; i++)
                 {
                     var name = result.Services[i].ServiceId.Uuid;
-                    if (name.ToString().StartsWith("00001106") || name.ToString().StartsWith("00001105"))
+                    if (name.ToString().StartsWith("00001105"))
                     {
                         serviceIndex = i;
                         break;
@@ -297,14 +298,14 @@ namespace UWPBluetoothTransfer
                 // Ensure previous connections are properly disposed
                 Dispose();
 
-                // Set up RFCOMM server listener
+                // Set up RFCOMM server listener 
+                // Windows seems to not require pairing when using OPP despite the SocketProtectionLevel chosen
                 Provider = await RfcommServiceProvider.CreateAsync(RfcommServiceId.ObexObjectPush); // OBEX Object Push Profile
                 Listener = new StreamSocketListener();
                 await Listener.BindServiceNameAsync(Provider.ServiceId.AsString(),
-                    SocketProtectionLevel.BluetoothEncryptionAllowNullAuthentication);
+                    SocketProtectionLevel.BluetoothEncryptionWithAuthentication);
 
-                // No idea if this is at all relevant to receiving connections from a paired device to receive a file.
-                // My guess is that it isn't, but as long as it doesn't break anything I'm not touching it
+                // Makes the service visible to remote Bluetooth devices that perform a service discovery scan
                 Provider.StartAdvertising(Listener);
 
                 ReceivedFile receivedFile = null;
@@ -447,7 +448,7 @@ namespace UWPBluetoothTransfer
                                         Windows.UI.Core.CoreDispatcherPriority.Normal,
                                         () =>
                                         {
-                                            // Call your method to show the prompt
+                                            // Call method to show the prompt
                                             IncomingFileTransferRequested?.Invoke(this, (fileName, fileSize));
                                         }
                                     );
@@ -506,8 +507,15 @@ namespace UWPBluetoothTransfer
                     }
                     catch (Exception ex)
                     {
-                        // Handle transfer errors
-                        throw new Exception($"File receive failed: {ex.Message}", ex);
+                        // Handle transfer errors, this is an async void function so exceptions thrown here will not be propagated and caught
+                        Dispose();
+                        await Windows.ApplicationModel.Core.CoreApplication.MainView.CoreWindow.Dispatcher.RunAsync(
+                            Windows.UI.Core.CoreDispatcherPriority.Normal,
+                            () =>
+                            { 
+                                // Update UI to show the error
+                                IncomingFileTransferCompleted?.Invoke(this, null);
+                            });
                     }
                 };
             }

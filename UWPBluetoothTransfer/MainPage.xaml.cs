@@ -121,7 +121,11 @@ namespace UWPBluetoothTransfer
             {
                 // Stop listening for incoming connections
                 await StopFileReceptionMode();
-                StatusText.Text = "File reception mode disabled.";
+
+                // A check to keep error texts or other information visible when the
+                // error resulted in reception mode being turned off
+                if (StatusText.Text == "Listening for incoming file transfers...")
+                    StatusText.Text = "File reception mode disabled.";
             }
         }
         private async void StartFileReceptionMode()
@@ -217,7 +221,8 @@ namespace UWPBluetoothTransfer
             }
             else
             {
-                StatusText.Text = "File received was null, unable to save.";
+                StatusText.Text = "Failed to receive file or file received was null, unable to save.";
+                await StopFileReceptionMode();
             }
         }
 
@@ -238,6 +243,7 @@ namespace UWPBluetoothTransfer
                 if (BluetoothTransfer != null)
                 {
                     BluetoothTransfer.IncomingFileTransferRequested -= OnIncomingIncomingFileTransferRequested;
+                    BluetoothTransfer.IncomingFileTransferCompleted -= OnIncomingFileTransferCompleted;
                     BluetoothTransfer.StopListeningForFileTransferConnection();
                 }
             }
