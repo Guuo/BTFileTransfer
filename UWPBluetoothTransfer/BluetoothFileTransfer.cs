@@ -72,7 +72,7 @@ namespace UWPBluetoothTransfer
 
                 if (serviceIndex == -1)
                 {
-                    throw new Exception("No file transfer RFCOMM services found on device.");
+                    throw new Exception("No Object Push Profile service found on device.");
                 }
 
                 RfcommService = result.Services[serviceIndex];
