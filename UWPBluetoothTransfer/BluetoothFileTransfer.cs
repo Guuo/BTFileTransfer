@@ -13,6 +13,7 @@ using MimeMapping;
 using System.Diagnostics;
 using System.ServiceModel.Dispatcher;
 using Windows.Storage.Pickers;
+using Windows.UI.Core;
 using static System.Net.WebRequestMethods;
 using Windows.UI.Xaml.Controls;
 
@@ -27,7 +28,7 @@ namespace UWPBluetoothTransfer
         public BluetoothDevice SelectedDevice {get; set;}
         public TaskCompletionSource<bool> UserResponseTask;
         public event EventHandler<(string fileName, long fileSize)> IncomingFileTransferRequested;
-        public event EventHandler<ReceivedFile> IncomingFileTransferCompleted;
+        public event EventHandler<(ReceivedFile, string message)> IncomingFileTransferCompleted;
 
         public async Task<List<BluetoothDevice>> ScanForBluetoothDevicesAsync()
         {
@@ -105,6 +106,7 @@ namespace UWPBluetoothTransfer
                     await writer.StoreAsync();
 
                     uint connectionId = 0;
+
                     // Read connect response
                     using (var reader = new DataReader(Socket.InputStream))
                     {
@@ -120,7 +122,23 @@ namespace UWPBluetoothTransfer
                         await reader.LoadAsync(responseSize - 3);
                         response = new byte[responseSize - 3];
                         reader.ReadBytes(response);
-                        connectionId = BitConverter.ToUInt32(response.SkipWhile(x => x != 0xCB).Skip(1).Take(4).Reverse().ToArray(), 0);
+
+                        byte[] connectionIdBytes = response
+                            .SkipWhile(x => x != 0xCB)
+                            .Skip(1) // Skip 0xCB
+                            .Take(4)
+                            .Reverse()
+                            .ToArray();
+
+                        // Check if 4 bytes were actually found
+                        if (connectionIdBytes.Length == 4)
+                        {
+                            connectionId = BitConverter.ToUInt32(connectionIdBytes, 0);
+                        }
+                        else
+                        {
+                            connectionId = 0;
+                        }
                         
                         // Send PUT request
                         byte[] putHeader = new byte[] {
@@ -128,9 +146,9 @@ namespace UWPBluetoothTransfer
                             0x00, 0x00 // Packet Length (to be filled)
                         };
 
-
                         // Name header
-                        byte[] tempNameBytes = System.Text.Encoding.Unicode.GetBytes(spoofFileType ? Path.GetFileNameWithoutExtension(file.Name) : file.Name);
+                        byte[] tempNameBytes = System.Text.Encoding.Unicode.GetBytes(
+                            spoofFileType ? Path.GetFileNameWithoutExtension(file.Name) : file.Name);
                         byte[] nameBytes = new byte[tempNameBytes.Length + 2];
 
                         // Swap endianness of name string
@@ -150,20 +168,28 @@ namespace UWPBluetoothTransfer
                         // Length header
                         byte[] lengthHeader = new byte[] {
                             0xC3, // Length header identifier
-                            (byte)(stream.Size >> 24), // The Length header is always 5 bytes total, 1 byte for the identifier + 4 bytes for the length value
+                            (byte)(stream.Size >> 24), // The Length header is always 5 bytes total, 1 byte
+                                                       // for the identifier + 4 bytes for the length value
                             (byte)(stream.Size >> 16),
                             (byte)(stream.Size >> 8),
                             (byte)stream.Size
                         };
 
-                        byte[] connectionIdHeader = new byte[]
+                        byte[] connectionIdHeader = Array.Empty<byte>(); // Default to empty
+
+                        // Only create the header if the connectionId is non-zero
+                        if (connectionId != 0)
                         {
-                            0xCB,
-                            (byte)(connectionId >> 24),
-                            (byte)(connectionId >> 16),
-                            (byte)(connectionId >> 8),
-                            (byte)connectionId
-                        };
+                            connectionIdHeader = new byte[]
+                            {
+                                0xCB,
+                                (byte)(connectionId >> 24),
+                                (byte)(connectionId >> 16),
+                                (byte)(connectionId >> 8),
+                                (byte)connectionId
+                            };
+                        }
+
                         
                         // Type header
                         string mimeType = MimeUtility.GetMimeMapping(file.Name + char.MinValue);
@@ -192,7 +218,8 @@ namespace UWPBluetoothTransfer
                         int packetLen = 0;
 
                         // New OBEX packet for each chunk
-                        while ((bodyBytes = await stream.AsStreamForRead().ReadAsync(buffer, 0, buffer.Length - firstPacketLength)) > 0)
+                        while ((bodyBytes = await stream.AsStreamForRead().
+                                   ReadAsync(buffer, 0, buffer.Length - firstPacketLength)) > 0)
                         {
                             // Body header
                             byte[] bodyHeader = new byte[]
@@ -204,7 +231,8 @@ namespace UWPBluetoothTransfer
 
                             if (chunkCount > 0)
                             {
-                                packetLen = bodyBytes + bodyHeader.Length + putHeader.Length + connectionIdHeader.Length;
+                                packetLen = bodyBytes + bodyHeader.Length +
+                                            putHeader.Length;
                             }
                             else
                             {
@@ -224,12 +252,15 @@ namespace UWPBluetoothTransfer
 
                             // Write headers
                             writer.WriteBytes(putHeader);
-                            writer.WriteBytes(connectionIdHeader);
 
                             // Only write these if this is the first packet
                             if (chunkCount == 0)
                             {
-                                
+                                // Write connectionIdHeader only if it's not empty
+                                if (connectionIdHeader.Length > 0)
+                                {
+                                    writer.WriteBytes(connectionIdHeader);
+                                }
                                 writer.WriteBytes(nameHeader);
                                 writer.WriteBytes(nameBytes);
                                 writer.WriteBytes(lengthHeader);
@@ -248,9 +279,11 @@ namespace UWPBluetoothTransfer
                             {
                                 if (response[0] == 0xCF)
                                 {
-                                    throw new Exception($"OBEX transfer failed with code 0x{BitConverter.ToString(response, 0, 1)}: Unsupported media type");
+                                    throw new Exception($"OBEX transfer failed with code 0x" +
+                                                        $"{BitConverter.ToString(response, 0, 1)}: Unsupported media type");
                                 }
-                                throw new Exception($"OBEX transfer failed with code 0x{BitConverter.ToString(response, 0, 1)}");
+                                throw new Exception($"OBEX transfer failed with code 0x" +
+                                                    $"{BitConverter.ToString(response, 0, 1)}");
                             }
                                 
 
@@ -264,7 +297,6 @@ namespace UWPBluetoothTransfer
                         {
                             0x82, // Put, final bit is set
                             0x00, 0x06, // Length of packet
-                            //0xcb, 0x00, 0x00, 0x00, 0x01, // Connection ID
                             0x49, // End of Body header
                             0x00, 0x03 // Length of body (0) plus HI and header length (3)
                         });
@@ -300,7 +332,7 @@ namespace UWPBluetoothTransfer
 
                 // Set up RFCOMM server listener 
                 // Windows seems to not require pairing when using OPP despite the SocketProtectionLevel chosen
-                Provider = await RfcommServiceProvider.CreateAsync(RfcommServiceId.ObexObjectPush); // OBEX Object Push Profile
+                Provider = await RfcommServiceProvider.CreateAsync(RfcommServiceId.ObexObjectPush);
                 Listener = new StreamSocketListener();
                 await Listener.BindServiceNameAsync(Provider.ServiceId.AsString(),
                     SocketProtectionLevel.BluetoothEncryptionWithAuthentication);
@@ -364,9 +396,35 @@ namespace UWPBluetoothTransfer
                                 await reader.LoadAsync(3);
                                 byte[] header = new byte[3];
                                 reader.ReadBytes(header);
-                                
-                                if (header[0] != 0x02 && header[0] != 0x82) // PUT request
-                                    throw new Exception($"Invalid OBEX operation, received header 0x{BitConverter.ToString(header, 0, 1)}" );
+
+                                switch (header[0])
+                                {
+                                    
+                                    case 0x02:  // Valid PUT-requests
+                                    case 0x82:
+                                        break;
+
+                                    case 0xFF:  // Handle ABORT request
+                                        byte[] OKResponse = new byte[] {
+                                            0xA0,
+                                            0x00, 0x03
+                                        };
+                                        writer.WriteBytes(OKResponse);
+                                        await writer.StoreAsync();
+                                        throw new Exception($"Current operation aborted by client");
+
+                                    case 0x03:  // Handle GET-request with NOT FOUND
+                                        byte[] NotFoundResponse = new byte[] {
+                                            0x44,
+                                            0x00, 0x03
+                                        };
+                                        writer.WriteBytes(NotFoundResponse);
+                                        await writer.StoreAsync();
+                                        throw new Exception($"Client attempted a GET request, which is not supported");
+
+                                    default:    // Other, unknown headers
+                                        throw new Exception($"Invalid OBEX operation, received header 0x{BitConverter.ToString(header, 0, 1)}");
+                                }
                                 
                                 int packetLength = (header[1] << 8) | header[2];
                                 await reader.LoadAsync((uint)packetLength - 3);
@@ -374,8 +432,6 @@ namespace UWPBluetoothTransfer
                                 // Process headers
                                 while (reader.UnconsumedBufferLength > 0)
                                 {
-                                    uint totalBytesLoadedFromCurrentPacket = 3 + reader.UnconsumedBufferLength;
-
                                     byte headerId = reader.ReadByte();
                                     switch (headerId)
                                     {
@@ -418,7 +474,6 @@ namespace UWPBluetoothTransfer
                                                     if(bodyLength - 3 - writtenBytes > 0)
                                                         await reader.LoadAsync((uint)(bodyLength - 3 - writtenBytes));
 
-                                                    totalBytesLoadedFromCurrentPacket += reader.UnconsumedBufferLength;
                                                 } while (writtenBytes < bodyLength - 3);
                                             }
                                             else
@@ -442,6 +497,7 @@ namespace UWPBluetoothTransfer
                                 
                                 if (packetCount == 1)
                                 {
+                                    // Contains the user response (accepted/declined) to the incoming transfer request
                                     UserResponseTask = new TaskCompletionSource<bool>();
 
                                     await Windows.ApplicationModel.Core.CoreApplication.MainView.CoreWindow.Dispatcher.RunAsync(
@@ -463,7 +519,7 @@ namespace UWPBluetoothTransfer
                                         };
                                         writer.WriteBytes(rejectResponse);
                                         await writer.StoreAsync();
-                                        return; // Exit the transfer
+                                        throw new Exception("File transfer declined.");
                                     }
                                 }
                                 
@@ -491,18 +547,19 @@ namespace UWPBluetoothTransfer
                                     break;
                             }
 
-                            // File name should have a trailing string terminator character "\0" that needs to be removed for it to be handled correctly
+                            // File name should have a trailing string terminator character "\0"
+                            // that needs to be removed for it to be handled correctly
                             string trimmedFileName = fileName.TrimEnd(char.MinValue);
                             receivedFile = new ReceivedFile(trimmedFileName, fileContent);
-                            
-                            // Send final success response
-                            byte[] finalResponse = new byte[] {
-                                0xA0, // Success
-                                0x00, 0x03 // Length
-                            };
-                            writer.WriteBytes(finalResponse);
-                            await writer.StoreAsync();
-                            IncomingFileTransferCompleted?.Invoke(this, receivedFile);
+
+                            await Windows.ApplicationModel.Core.CoreApplication.MainView.CoreWindow.Dispatcher.RunAsync(
+                                Windows.UI.Core.CoreDispatcherPriority.Normal,
+                                () =>
+                                {
+                                    IncomingFileTransferCompleted?.Invoke(this,
+                                        (receivedFile, "File transfer successful."));
+                                });
+
                         }
                     }
                     catch (Exception ex)
@@ -514,7 +571,7 @@ namespace UWPBluetoothTransfer
                             () =>
                             { 
                                 // Update UI to show the error
-                                IncomingFileTransferCompleted?.Invoke(this, null);
+                                IncomingFileTransferCompleted?.Invoke(this, (null, ex.Message));
                             });
                     }
                 };

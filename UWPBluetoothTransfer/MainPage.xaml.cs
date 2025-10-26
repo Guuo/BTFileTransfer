@@ -144,7 +144,7 @@ namespace UWPBluetoothTransfer
                 });
 
                 // Subscribe to event that triggers after the first packet of a file has been read
-                BluetoothTransfer.IncomingFileTransferRequested += OnIncomingIncomingFileTransferRequested;
+                BluetoothTransfer.IncomingFileTransferRequested += OnIncomingFileTransferRequested;
                 BluetoothTransfer.IncomingFileTransferCompleted += OnIncomingFileTransferCompleted;
 
                 await BluetoothTransfer.StartListeningForFileTransferConnectionAsync(progress);
@@ -208,23 +208,25 @@ namespace UWPBluetoothTransfer
             return true;
         }
 
-        private async void OnIncomingIncomingFileTransferRequested(object sender, (string fileName, long fileSize) args)
+        private async void OnIncomingFileTransferRequested(object sender, (string fileName, long fileSize) args)
         {
             await ShowIncomingFileTransferPrompt(args.fileName, args.fileSize);
         }
 
-        private async void OnIncomingFileTransferCompleted(object sender, ReceivedFile file)
+        private async void OnIncomingFileTransferCompleted(object sender, (ReceivedFile file, string message) args)
         {
-            if (file != null)
+            if (args.file != null)
             {
-                await SaveReceivedFile(file);
+                await SaveReceivedFile(args.file);
+                StatusText.Text = args.message;
             }
             else
             {
-                StatusText.Text = "Failed to receive file or file received was null, unable to save.";
+                StatusText.Text = args.message;
                 await StopFileReceptionMode();
             }
         }
+
 
         public async Task StopFileReceptionMode()
         {
@@ -242,7 +244,7 @@ namespace UWPBluetoothTransfer
                 // Unsubscribe from events
                 if (BluetoothTransfer != null)
                 {
-                    BluetoothTransfer.IncomingFileTransferRequested -= OnIncomingIncomingFileTransferRequested;
+                    BluetoothTransfer.IncomingFileTransferRequested -= OnIncomingFileTransferRequested;
                     BluetoothTransfer.IncomingFileTransferCompleted -= OnIncomingFileTransferCompleted;
                     BluetoothTransfer.StopListeningForFileTransferConnection();
                 }
